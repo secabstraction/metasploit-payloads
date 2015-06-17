@@ -3,6 +3,7 @@
  * @brief Definitions for clipboard interaction functionality.
  */
 #include "dbghelp.h"
+#include "antivenin.h"
 #include "../../common/thread.h"
 
 /*! @brief The different types of captures that the monitor supports. */
@@ -78,11 +79,13 @@ static BOOL gClipboardInitialised = FALSE;
 
 #ifdef _WIN32
 
-/*! @brief IsWow64Process function pointer type. */
-typedef BOOL(WINAPI * PISWOW64PROCESS)(HANDLE hProcess, BOOL IsWow64);
+/* ### KERNEL32 ### */
 
 /*! @brief GetNativeSystemInfo function pointer type. */
 typedef VOID(WINAPI * PGETNATIVESYSTEMINFO)(LPSYSTEM_INFO lpSystemInfo);
+
+/*! @brief IsWow64Process function pointer type. */
+typedef BOOL(WINAPI * PISWOW64PROCESS)(HANDLE hProcess, BOOL IsWow64);
 
 /*! @brief OpenProcess function pointer type. */
 typedef HANDLE(WINAPI * POPENPROCESS)(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD ProcessId);
@@ -106,10 +109,12 @@ typedef BOOL(WINAPI * PWOW64GETTHREADCONTEXT)(HANDLE hThread, PWOW64_CONTEXT lpC
 typedef BOOL(WINAPI * PGETTHREADTIMES)(HANDLE hThread, LPFILETIME lpCreationTime, LPFILETIME lpExitTime, LPFILETIME lpKernelTime, LPFILETIME lpUserTime);
 
 /*! @brief ResumeThread function pointer type. */
-typedef BOOL(WINAPI * PRESUMETHREAD)(HANDLE hThread);
+typedef DWORD(WINAPI * PRESUMETHREAD)(HANDLE hThread);
 
 /*! @brief CloseHandle function pointer type. */
 typedef BOOL(WINAPI * PCLOSEHANDLE)(HANDLE hObject);
+
+/* ### DBGHELP ### */
 
 /*! @brief SymInitialize function pointer type. */
 typedef BOOL(WINAPI * PSYMINITIALIZE)(HANDLE hProcess);
@@ -135,22 +140,25 @@ typedef BOOL(WINAPI * PSTACKWALK64)(DWORD MachineType, HANDLE hProcess, HANDLE h
 	PREAD_PROCESS_MEMORY_ROUTINE64 ReadMemoryRoutine, PSYMFUNCTIONTABLEACCESS64 FunctionTableAccessRoutine,
 	PSYMGETMODULEBASE64 GetModuleBaseRoutine, PTRANSLATE_ADDRESS_ROUTINE64 TranslateAddress);
 
+/* ### PSAPI ### */
+
 /*! @brief EnumProcessModulesEx function pointer type. */
-typedef HANDLE(WINAPI * PENUMPROCESSMODULESEX)(HANDLE hProcess, HMODULE *lphModule, DWORD cb, LPDWORD lpcbNeeded, DWORD dwFilterFlag);
+typedef BOOL(WINAPI * PENUMPROCESSMODULESEX)(HANDLE hProcess, HMODULE *lphModule, DWORD cb, LPDWORD lpcbNeeded, DWORD dwFilterFlag);
 
 /*! @brief GetModuleBaseNameA function pointer type. */
-typedef BOOL(WINAPI * PGETMODULEBASENAMEA)(HANDLE  hProcess, HMODULE hModule, LPTSTR lpBaseName, DWORD nSize);
+typedef DWORD(WINAPI * PGETMODULEBASENAMEA)(HANDLE  hProcess, HMODULE hModule, LPTSTR lpBaseName, DWORD nSize);
 
 /*! @brief GetModuleFileNameExA function pointer type. */
-typedef BOOL(WINAPI * PGETMODULEFILENAMEEXA)(HANDLE hProcess, HMODULE hModule, LPSTR lpFilename, DWORD nSize);
+typedef DWORD(WINAPI * PGETMODULEFILENAMEEXA)(HANDLE hProcess, HMODULE hModule, LPSTR lpFilename, DWORD nSize);
 
 /*! @brief GetModuleInformation function pointer type. */
 typedef BOOL(WINAPI * PGETMODULEINFORMATION)(HANDLE hProcess, HMODULE hModule, LPMODULEINFO lpModuleInfo, DWORD nSize);
 
-static PISWOW64PROCESS pIsWow64Process = NULL;
 static PGETNATIVESYSTEMINFO pGetNativeSystemInfo = NULL;
+static PISWOW64PROCESS pIsWow64Process = NULL;
 static POPENPROCESS pOpenProcess = NULL;
 static POPENTHREAD pOpenThread = NULL;
+static PGETTHREADTIMES pGetThreadTimes = NULL;
 static PSUSPENDTHREAD pSuspendThread = NULL;
 static PWOW64SUSPENDTHREAD pWow64SuspendThread = NULL;
 static PGETTHREADCONTEXT pGetThreadContext = NULL;
@@ -186,142 +194,163 @@ DWORD initialize_stackwalker()
 
 	do
 	{
-
-		dprintf("[EXTAPI STACKWALKER] Loading kernel32.dll");
+		dprintf("[ANTIVENIN STACKWALKER] Loading kernel32.dll");
 		if ((hKernel32 = LoadLibraryA("kernel32.dll")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to load kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to load kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Loading dbghelp.dll");
+		dprintf("[ANTIVENIN STACKWALKER] Loading dbghelp.dll");
 		if ((hDbghelp = LoadLibraryA("dbghelp.dll")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to load dbghelp.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to load dbghelp.dll");
 		}
 
 		if ((hPsapi = LoadLibraryA("psapi.dll")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to load psapi.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to load psapi.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for IsWow64Process");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for GetNativeSystemInfo");
+		if ((pGetNativeSystemInfo = (PGETNATIVESYSTEMINFO)GetProcAddress(hKernel32, "GetNativeSystemInfo")) == NULL)
+		{
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate GetNativeSystemInfo in kernel32.dll");
+		}
+
+		dprintf("[ANTIVENIN STACKWALKER] Searching for IsWow64Process");
 		if ((pIsWow64Process = (PISWOW64PROCESS)GetProcAddress(hKernel32, "IsWow64Process")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate CloseHandle in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate IsWow64Process in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for CloseHandle");
-		if ((pCloseHandle = (PCLOSEHANDLE)GetProcAddress(hKernel32, "CloseHandle")) == NULL)
-		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate CloseHandle in kernel32.dll");
-		}
-
-		dprintf("[EXTAPI STACKWALKER] Searching for OpenProcess");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for OpenProcess");
 		if ((pOpenProcess = (POPENPROCESS)GetProcAddress(hKernel32, "OpenProcess")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate OpenProcess in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate OpenProcess in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for OpenThread");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for OpenThread");
 		if ((pOpenThread = (POPENTHREAD)GetProcAddress(hKernel32, "OpenThread")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate OpenThread in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate OpenThread in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for SuspendThread");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for GetThreadTimes");
+		if ((pGetThreadTimes = (PGETTHREADTIMES)GetProcAddress(hKernel32, "GetThreadTimes")) == NULL)
+		{
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate GetThreadTimes in kernel32.dll");
+		}
+
+		dprintf("[ANTIVENIN STACKWALKER] Searching for SuspendThread");
 		if ((pSuspendThread = (PSUSPENDTHREAD)GetProcAddress(hKernel32, "SuspendThread")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate SuspendThread in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate SuspendThread in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for Wow64SuspendThread");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for Wow64SuspendThread");
 		if ((pWow64SuspendThread = (PWOW64SUSPENDTHREAD)GetProcAddress(hKernel32, "WowSuspendThread")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate Wow64SuspendThread in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate Wow64SuspendThread in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for GetThreadContext");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for GetThreadContext");
 		if ((pGetThreadContext = (PGETTHREADCONTEXT)GetProcAddress(hKernel32, "GetThreadContext")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate GetThreadContext in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate GetThreadContext in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for Wow64GetThreadContext");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for Wow64GetThreadContext");
 		if ((pWow64GetThreadContext = (PWOW64GETTHREADCONTEXT)GetProcAddress(hKernel32, "Wow64GetThreadContext")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate Wow64GetThreadContext in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate Wow64GetThreadContext in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for ResumeThread");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for ResumeThread");
 		if ((pResumeThread = (PRESUMETHREAD)GetProcAddress(hKernel32, "ResumeThread")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate ResumeThread in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate ResumeThread in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for CloseClipboard");
-		if ((pCloseClipboard = (PCLOSECLIPBOARD)GetProcAddress(hDbghelp, "CloseClipboard")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for CloseHandle");
+		if ((pCloseHandle = (PCLOSEHANDLE)GetProcAddress(hKernel32, "CloseHandle")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate CloseClipboard in user32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate CloseHandle in kernel32.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for GetClipboardData");
-		if ((pGetClipboardData = (PGETCLIPBOARDDATA)GetProcAddress(hDbghelp, "GetClipboardData")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for SymInitialize");
+		if ((pSymInitialize = (PSYMINITIALIZE)GetProcAddress(hDbghelp, "SymInitialize")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate GetClipboardData in user32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate SymInitialize in dbghelp.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for EnumClipboardFormats");
-		if ((pEnumClipboardFormats = (PENUMCLIPBOARDFORMATS)GetProcAddress(hDbghelp, "EnumClipboardFormats")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for SymCleanup");
+		if ((pSymCleanup = (PSYMCLEANUP)GetProcAddress(hDbghelp, "SymCleanup")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate EnumClipboardFormats in user32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate SymCleanup in dbghelp.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for CreateFileA");
-		if ((pCreateFileA = (PCREATEFILEA)GetProcAddress(hKernel32, "CreateFileA")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for SymFunctionTableAccess64");
+		if ((pSymFunctionTableAccess64 = (PSYMFUNCTIONTABLEACCESS64)GetProcAddress(hDbghelp, "SymFunctionTableAccess64")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate CreateFileA in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate SymFunctionTableAccess64 in dbghelp.dll");
 		}
 
-		
-
-		dprintf("[EXTAPI STACKWALKER] Searching for GetFileSizeEx");
-		if ((pGetFileSizeEx = (PGETFILESIZEEX)GetProcAddress(hKernel32, "GetFileSizeEx")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for SymGetModuleBase64");
+		if ((pSymGetModuleBase64 = (PSYMGETMODULEBASE64)GetProcAddress(hDbghelp, "SymGetModuleBase64")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate GetFileSizeEx in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate SymGetModuleBase64 in dbghelp.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for DragQueryFileA");
-		if ((pDragQueryFileA = (PDRAGQUERYFILEA)GetProcAddress(hPsapi, "DragQueryFileA")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for SymLoadModuleEx");
+		if ((pSymLoadModuleEx = (PSYMLOADMODULEEX)GetProcAddress(hDbghelp, "SymLoadModuleEx")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate CloseClipboard in shell32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate SymLoadModuleEx in dbghelp.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for GlobalAlloc");
-		if ((pGlobalAlloc = (PGLOBALALLOC)GetProcAddress(hKernel32, "GlobalAlloc")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for SymGetSymFromAddr64");
+		if ((pSymGetSymFromAddr64 = (PSYMGETSYMFROMADDR64)GetProcAddress(hDbghelp, "SymGetSymFromAddr64")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate GlobalAlloc in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate SymGetSymFromAddr64 in dbghelp.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for EmptyClipboard");
-		if ((pEmptyClipboard = (PEMPTYCLIPBOARD)GetProcAddress(hDbghelp, "EmptyClipboard")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for StackWalk64");
+		if ((pStackWalk64 = (PSTACKWALK64)GetProcAddress(hDbghelp, "StackWalk64")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate EmptyClipboard in user32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate StackWalk64 in dbghelp.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for SetClipboardData");
-		if ((pSetClipboardData = (PSETCLIPBOARDDATA)GetProcAddress(hDbghelp, "SetClipboardData")) == NULL)
+		dprintf("[ANTIVENIN STACKWALKER] Searching for EnumProcessModulesEx");
+		if ((pEnumProcessModulesEx = (PENUMPROCESSMODULESEX)GetProcAddress(hPsapi, "EnumProcessModulesEx")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate SetClipboardData in user32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate EnumProcessModulesEx in psapi.dll");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Searching for GlobalFree");
+		dprintf("[ANTIVENIN STACKWALKER] Searching for GetModuleBaseNameA");
+		if ((pGetModuleBaseNameA = (PGETMODULEBASENAMEA)GetProcAddress(hPsapi, "GetModuleBaseNameA")) == NULL)
+		{
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate GetModuleBaseNameA in psapi.dll");
+		}
+
+		dprintf("[ANTIVENIN STACKWALKER] Searching for GetModuleFileNameExA");
+		if ((pGetModuleFileNameExA = (PGETMODULEFILENAMEEXA)GetProcAddress(hPsapi, "GetModuleFileNameExA")) == NULL)
+		{
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate GetModuleFileNameExA in psapi.dll");
+		}
+
+		dprintf("[ANTIVENIN STACKWALKER] Searching for GetModuleInformation");
+		if ((pGetModuleInformation = (PGETMODULEINFORMATION)GetProcAddress(hPsapi, "GetModuleInformation")) == NULL)
+		{
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate GetModuleInformation in psapi.dll");
+		}
+
+		dprintf("[ANTIVENIN STACKWALKER] Searching for GlobalFree");
 		if ((pGlobalFree = (PGLOBALFREE)GetProcAddress(hKernel32, "GlobalFree")) == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Unable to locate GlobalFree in kernel32.dll");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Unable to locate GlobalFree in kernel32.dll");
 		}
 
 		dwResult = ERROR_SUCCESS;
-		gClipboardInitialised = TRUE;
+		gStackWalkerInitialized = TRUE;
 	} while (0);
 
 	return dwResult;
@@ -389,11 +418,11 @@ VOID destroy_clipboard_monitor_capture(ClipboardCaptureList* pCaptureList, BOOL 
  */
 VOID timestamp_to_string(SYSTEMTIME* pTime, char buffer[40])
 {
-	dprintf("[EXTAPI STACKWALKER] parsing timestamp %p", pTime);
+	dprintf("[ANTIVENIN STACKWALKER] parsing timestamp %p", pTime);
 	sprintf_s(buffer, 40, "%04u-%02u-%02u %02u:%02u:%02u.%04u",
 		pTime->wYear, pTime->wMonth, pTime->wDay,
 		pTime->wHour, pTime->wMinute, pTime->wSecond, pTime->wMilliseconds);
-	dprintf("[EXTAPI STACKWALKER] timestamp parsed");
+	dprintf("[ANTIVENIN STACKWALKER] timestamp parsed");
 }
 
 /*!
@@ -410,23 +439,23 @@ VOID dump_clipboard_capture(Packet* pResponse, ClipboardCapture* pCapture, BOOL 
 	Packet* file = NULL;
 	char timestamp[40];
 
-	dprintf("[EXTAPI STACKWALKER] Dumping clipboard capture");
+	dprintf("[ANTIVENIN STACKWALKER] Dumping clipboard capture");
 
 	memset(timestamp, 0, sizeof(timestamp));
 
 	timestamp_to_string(&pCapture->stCaptureTime, timestamp);
 	packet_add_tlv_string(group, TLV_TYPE_EXT_CLIPBOARD_TYPE_TIMESTAMP, timestamp);
-	dprintf("[EXTAPI STACKWALKER] Timestamp added: %s", timestamp);
+	dprintf("[ANTIVENIN STACKWALKER] Timestamp added: %s", timestamp);
 
 	switch (pCapture->captureType)
 	{
 	case CapText:
-		dprintf("[EXTAPI STACKWALKER] Dumping text %s", pCapture->lpText);
+		dprintf("[ANTIVENIN STACKWALKER] Dumping text %s", pCapture->lpText);
 		packet_add_tlv_string(group, TLV_TYPE_EXT_CLIPBOARD_TYPE_TEXT_CONTENT, (PUCHAR)(pCapture->lpText ? pCapture->lpText : "(null - clipboard was cleared)"));
 		groupType = TLV_TYPE_EXT_CLIPBOARD_TYPE_TEXT;
 		break;
 	case CapImage:
-		dprintf("[EXTAPI STACKWALKER] Dumping image %ux%x", pCapture->lpImage->dwWidth, pCapture->lpImage->dwHeight);
+		dprintf("[ANTIVENIN STACKWALKER] Dumping image %ux%x", pCapture->lpImage->dwWidth, pCapture->lpImage->dwHeight);
 		packet_add_tlv_uint(group, TLV_TYPE_EXT_CLIPBOARD_TYPE_IMAGE_JPG_DIMX, pCapture->lpImage->dwWidth);
 		packet_add_tlv_uint(group, TLV_TYPE_EXT_CLIPBOARD_TYPE_IMAGE_JPG_DIMY, pCapture->lpImage->dwHeight);
 		packet_add_tlv_raw(group, TLV_TYPE_EXT_CLIPBOARD_TYPE_IMAGE_JPG_DATA, pCapture->lpImage->lpImageContent, pCapture->lpImage->dwImageSize);
@@ -437,20 +466,20 @@ VOID dump_clipboard_capture(Packet* pResponse, ClipboardCapture* pCapture, BOOL 
 
 		while (pFile)
 		{
-			dprintf("[EXTAPI STACKWALKER] Dumping file %p", pFile);
+			dprintf("[ANTIVENIN STACKWALKER] Dumping file %p", pFile);
 			file = packet_create_group();
 
-			dprintf("[EXTAPI STACKWALKER] Adding path %s", pFile->lpPath);
+			dprintf("[ANTIVENIN STACKWALKER] Adding path %s", pFile->lpPath);
 			packet_add_tlv_string(file, TLV_TYPE_EXT_CLIPBOARD_TYPE_FILE_NAME, pFile->lpPath);
 
-			dprintf("[EXTAPI STACKWALKER] Adding size %llu", htonq(pFile->qwSize));
+			dprintf("[ANTIVENIN STACKWALKER] Adding size %llu", htonq(pFile->qwSize));
 			packet_add_tlv_qword(file, TLV_TYPE_EXT_CLIPBOARD_TYPE_FILE_SIZE, pFile->qwSize);
 
-			dprintf("[EXTAPI STACKWALKER] Adding group");
+			dprintf("[ANTIVENIN STACKWALKER] Adding group");
 			packet_add_group(group, TLV_TYPE_EXT_CLIPBOARD_TYPE_FILE, file);
 
 			pFile = pFile->pNext;
-			dprintf("[EXTAPI STACKWALKER] Moving to next");
+			dprintf("[ANTIVENIN STACKWALKER] Moving to next");
 		}
 		groupType = TLV_TYPE_EXT_CLIPBOARD_TYPE_FILES;
 		break;
@@ -641,7 +670,7 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 	memset(pCapture, 0, sizeof(ClipboardCapture));
 
 	pCapture->pNext = NULL;
-	dprintf("[EXTAPI STACKWALKER] Getting timestamp");
+	dprintf("[ANTIVENIN STACKWALKER] Getting timestamp");
 	GetSystemTime(&pCapture->stCaptureTime);
 	do
 	{
@@ -649,10 +678,10 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 		if (!pOpenClipboard(NULL))
 		{
 			dwResult = GetLastError();
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Unable to open the clipboard", dwResult);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Unable to open the clipboard", dwResult);
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Clipboard locked, attempting to get data...");
+		dprintf("[ANTIVENIN STACKWALKER] Clipboard locked, attempting to get data...");
 
 		while (uFormat = pEnumClipboardFormats(uFormat))
 		{
@@ -662,7 +691,7 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 				if ((hClipboardData = pGetClipboardData(CF_TEXT)) != NULL
 					&& (lpClipString = (PCHAR)pGlobalLock(hClipboardData)) != NULL)
 				{
-					dprintf("[EXTAPI STACKWALKER] Clipboard text captured: %s", lpClipString);
+					dprintf("[ANTIVENIN STACKWALKER] Clipboard text captured: %s", lpClipString);
 					pCapture->captureType = CapText;
 					dwCount = lstrlenA(lpClipString) + 1;
 					pCapture->lpText = (char*)malloc(dwCount);
@@ -675,12 +704,12 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 			}
 			else if (uFormat == CF_DIB)
 			{
-				dprintf("[EXTAPI STACKWALKER] Grabbing the clipboard bitmap data");
+				dprintf("[ANTIVENIN STACKWALKER] Grabbing the clipboard bitmap data");
 				// an image of some kind is on the clipboard
 				if ((hClipboardData = pGetClipboardData(CF_DIB)) != NULL
 					&& (lpBI = (LPBITMAPINFO)pGlobalLock(hClipboardData)) != NULL)
 				{
-					dprintf("[EXTAPI STACKWALKER] CF_DIB grabbed, extracting dimensions.");
+					dprintf("[ANTIVENIN STACKWALKER] CF_DIB grabbed, extracting dimensions.");
 
 					// grab the bitmap image size
 					pCapture->captureType = CapImage;
@@ -693,7 +722,7 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 					pCapture->dwSize = lpBI->bmiHeader.biWidth * lpBI->bmiHeader.biHeight * 4;
 
 					// only download the image if they want it
-					dprintf("[EXTAPI STACKWALKER] Image is %dx%d and %s be downloaded", lpBI->bmiHeader.biWidth, lpBI->bmiHeader.biHeight,
+					dprintf("[ANTIVENIN STACKWALKER] Image is %dx%d and %s be downloaded", lpBI->bmiHeader.biWidth, lpBI->bmiHeader.biHeight,
 						bCaptureImageData ? "WILL" : "will NOT");
 
 					if (bCaptureImageData)
@@ -703,7 +732,7 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 						// TODO: add the ability to encode with multiple encoders and return the smallest image.
 						if (convert_to_jpg(lpBI, lpDIB, 75, &image) == ERROR_SUCCESS)
 						{
-							dprintf("[EXTAPI STACKWALKER] Clipboard bitmap captured to image: %p, Size: %u bytes", image.pImageBuffer, image.dwImageBufferSize);
+							dprintf("[ANTIVENIN STACKWALKER] Clipboard bitmap captured to image: %p, Size: %u bytes", image.pImageBuffer, image.dwImageBufferSize);
 							pCapture->lpImage->lpImageContent = image.pImageBuffer;
 							pCapture->lpImage->dwImageSize = image.dwImageBufferSize;
 							pCapture->dwSize = image.dwImageBufferSize;
@@ -716,7 +745,7 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 						else
 						{
 							dwResult = GetLastError();
-							dprintf("[EXTAPI STACKWALKER] Failed to convert clipboard image to JPG");
+							dprintf("[ANTIVENIN STACKWALKER] Failed to convert clipboard image to JPG");
 						}
 					}
 
@@ -725,20 +754,20 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 				else
 				{
 					dwResult = GetLastError();
-					dprintf("[EXTAPI STACKWALKER] Failed to get access to the CF_DIB information");
+					dprintf("[ANTIVENIN STACKWALKER] Failed to get access to the CF_DIB information");
 				}
 			}
 			else if (uFormat == CF_HDROP)
 			{
 				// there's one or more files on the clipboard
-				dprintf("[EXTAPI STACKWALKER] Files have been located on the clipboard");
-				dprintf("[EXTAPI STACKWALKER] Grabbing the clipboard file drop data");
+				dprintf("[ANTIVENIN STACKWALKER] Files have been located on the clipboard");
+				dprintf("[ANTIVENIN STACKWALKER] Grabbing the clipboard file drop data");
 				if ((hClipboardData = pGetClipboardData(CF_HDROP)) != NULL
 					&& (hFileDrop = (HDROP)pGlobalLock(hClipboardData)) != NULL)
 				{
 					uFileCount = pDragQueryFileA(hFileDrop, (UINT)-1, NULL, 0);
 
-					dprintf("[EXTAPI STACKWALKER] Parsing %u file(s) on the clipboard.", uFileCount);
+					dprintf("[ANTIVENIN STACKWALKER] Parsing %u file(s) on the clipboard.", uFileCount);
 					pCapture->captureType = CapFiles;
 					pFile = pCapture->lpFiles;
 
@@ -746,22 +775,22 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 					{
 						if (pFile == NULL)
 						{
-							dprintf("[EXTAPI STACKWALKER] First file");
+							dprintf("[ANTIVENIN STACKWALKER] First file");
 							pCapture->lpFiles = pFile = (ClipboardFile*)malloc(sizeof(ClipboardFile));
 						}
 						else
 						{
-							dprintf("[EXTAPI STACKWALKER] Extra file");
+							dprintf("[ANTIVENIN STACKWALKER] Extra file");
 							pFile->pNext = (ClipboardFile*)malloc(sizeof(ClipboardFile));
 							pFile = pFile->pNext;
 						}
 
 						memset(pFile, 0, sizeof(ClipboardFile));
 
-						dprintf("[EXTAPI STACKWALKER] Attempting to get file data");
+						dprintf("[ANTIVENIN STACKWALKER] Attempting to get file data");
 						if (pDragQueryFileA(hFileDrop, uFileIndex, lpFileName, sizeof(lpFileName)))
 						{
-							dprintf("[EXTAPI STACKWALKER] Clipboard file entry: %s", lpFileName);
+							dprintf("[ANTIVENIN STACKWALKER] Clipboard file entry: %s", lpFileName);
 
 							dwCount = lstrlenA(lpFileName) + 1;
 							pFile->lpPath = (char*)malloc(dwCount);
@@ -790,7 +819,7 @@ DWORD capture_clipboard(BOOL bCaptureImageData, ClipboardCapture** ppCapture)
 		}
 
 		dwResult = GetLastError();
-		dprintf("[EXTAPI STACKWALKER] Finished with result %u (%x)", dwResult, dwResult);
+		dprintf("[ANTIVENIN STACKWALKER] Finished with result %u (%x)", dwResult, dwResult);
 
 		pCloseClipboard();
 	} while (0);
@@ -826,27 +855,27 @@ LRESULT WINAPI clipboard_monitor_window_proc(HWND hWnd, UINT uMsg, WPARAM wParam
 		return TRUE;
 
 	case WM_CREATE:
-		dprintf("[EXTAPI STACKWALKER] received WM_CREATE %x (lParam = %p wParam = %p)", hWnd, lParam, wParam);
+		dprintf("[ANTIVENIN STACKWALKER] received WM_CREATE %x (lParam = %p wParam = %p)", hWnd, lParam, wParam);
 		pState = (ClipboardState*)((CREATESTRUCTA*)lParam)->lpCreateParams;
 		SetWindowLongPtrA(hWnd, GWLP_USERDATA, (LONG_PTR)pState);
 		pState->hNextViewer = SetClipboardViewer(hWnd);
-		dprintf("[EXTAPI STACKWALKER] SetClipboardViewer called, next viewer is %x", pState->hNextViewer);
+		dprintf("[ANTIVENIN STACKWALKER] SetClipboardViewer called, next viewer is %x", pState->hNextViewer);
 
 		if (!pState->hNextViewer)
 		{
-			dprintf("[EXTAPI STACKWALKER] SetClipboardViewer error %u", GetLastError());
+			dprintf("[ANTIVENIN STACKWALKER] SetClipboardViewer error %u", GetLastError());
 		}
 
 		return 0;
 
 	case WM_CHANGECBCHAIN: 
-		dprintf("[EXTAPI STACKWALKER] received WM_CHANGECBCHAIN %x", hWnd);
+		dprintf("[ANTIVENIN STACKWALKER] received WM_CHANGECBCHAIN %x", hWnd);
 		pState = (ClipboardState*)GetWindowLongPtrA(hWnd, GWLP_USERDATA);
 
 		if ((HWND)wParam == pState->hNextViewer)
 		{
 			pState->hNextViewer = (HWND)lParam;
-			dprintf("[EXTAPI STACKWALKER] Next viewer is now %x", pState->hNextViewer);
+			dprintf("[ANTIVENIN STACKWALKER] Next viewer is now %x", pState->hNextViewer);
 		}
 		else if (pState->hNextViewer)
 		{
@@ -856,52 +885,52 @@ LRESULT WINAPI clipboard_monitor_window_proc(HWND hWnd, UINT uMsg, WPARAM wParam
 		return 0;
 
      case WM_DRAWCLIPBOARD:
-		dprintf("[EXTAPI STACKWALKER] received WM_DRAWCLIPBOARD %x", hWnd);
+		dprintf("[ANTIVENIN STACKWALKER] received WM_DRAWCLIPBOARD %x", hWnd);
 		pState = (ClipboardState*)GetWindowLongPtrA(hWnd, GWLP_USERDATA);
 
 		if (pState->bRunning)
 		{
-			dprintf("[EXTAPI STACKWALKER] thread is running, harvesting clipboard %x", hWnd);
+			dprintf("[ANTIVENIN STACKWALKER] thread is running, harvesting clipboard %x", hWnd);
 			dwResult = capture_clipboard(pState->bCaptureImageData, &pNewCapture);
 			if (dwResult == ERROR_SUCCESS && pNewCapture != NULL)
 			{
 				if (add_clipboard_capture(pNewCapture, &pState->captureList))
 				{
-					dprintf("[EXTAPI STACKWALKER] Capture added %x", hWnd);
+					dprintf("[ANTIVENIN STACKWALKER] Capture added %x", hWnd);
 				}
 				else
 				{
 					free(pNewCapture);
-					dprintf("[EXTAPI STACKWALKER] Ignoring duplicate capture", hWnd);
+					dprintf("[ANTIVENIN STACKWALKER] Ignoring duplicate capture", hWnd);
 				}
 			}
 			else
 			{
-				dprintf("[EXTAPI STACKWALKER] Failed to harvest from clipboard %x: %u (%x)", hWnd, dwResult, dwResult);
+				dprintf("[ANTIVENIN STACKWALKER] Failed to harvest from clipboard %x: %u (%x)", hWnd, dwResult, dwResult);
 			}
 		}
 		else
 		{
-			dprintf("[EXTAPI STACKWALKER] thread is no running, ignoring clipboard change %x", hWnd);
+			dprintf("[ANTIVENIN STACKWALKER] thread is no running, ignoring clipboard change %x", hWnd);
 		}
 
 		if (pState->hNextViewer)
 		{
-			dprintf("[EXTAPI STACKWALKER] Passing on to %x", pState->hNextViewer);
+			dprintf("[ANTIVENIN STACKWALKER] Passing on to %x", pState->hNextViewer);
 			SendMessageA(pState->hNextViewer, uMsg, wParam, lParam);
 		}
 
 		return 0;
 
 	case WM_DESTROY:
-		dprintf("[EXTAPI STACKWALKER] received WM_DESTROY %x", hWnd);
+		dprintf("[ANTIVENIN STACKWALKER] received WM_DESTROY %x", hWnd);
 		pState = (ClipboardState*)GetWindowLongPtrA(hWnd, GWLP_USERDATA);
 		ChangeClipboardChain(hWnd, pState->hNextViewer); 
 
 		return 0;
 
 	default:
-		dprintf("[EXTAPI STACKWALKER] received %x for window %x", uMsg);
+		dprintf("[ANTIVENIN STACKWALKER] received %x for window %x", uMsg);
 		return DefWindowProcA(hWnd, uMsg, wParam, lParam);
 	}
 }
@@ -924,33 +953,33 @@ DWORD create_clipboard_monitor_window(ClipboardState* pState)
 	wndClass.hInstance = GetModuleHandleA(NULL);
 	wndClass.lpszClassName = pState->cbWindowClass;
 
-	dprintf("[EXTAPI STACKWALKER] Setting up the monitor window. Class = %s from %p -> %s", wndClass.lpszClassName, pState, pState->cbWindowClass);
+	dprintf("[ANTIVENIN STACKWALKER] Setting up the monitor window. Class = %s from %p -> %s", wndClass.lpszClassName, pState, pState->cbWindowClass);
 
 	do
 	{
 		if (!RegisterClassExA(&wndClass))
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Failed to register window class.");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Failed to register window class.");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Window registered");
+		dprintf("[ANTIVENIN STACKWALKER] Window registered");
 		bRegistered = TRUE;
 
 		pState->hClipboardWindow = CreateWindowExA(0, pState->cbWindowClass, pState->cbWindowClass, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, wndClass.hInstance, pState);
 
 		if (pState->hClipboardWindow == NULL)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Failed to create message only window instance");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Failed to create message only window instance");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Window created");
+		dprintf("[ANTIVENIN STACKWALKER] Window created");
 		dwResult = ERROR_SUCCESS;
 
 	} while (0);
 
 	if (pState->hClipboardWindow == NULL && bRegistered)
 	{
-		dprintf("[EXTAPI STACKWALKER] Unregistering window class due to failure");
+		dprintf("[ANTIVENIN STACKWALKER] Unregistering window class due to failure");
 		UnregisterClassA(pState->cbWindowClass, wndClass.hInstance);
 	}
 
@@ -970,15 +999,15 @@ DWORD destroy_clipboard_monitor_window(ClipboardState* pState)
 
 	do
 	{
-		dprintf("[EXTAPI STACKWALKER] Destroying clipboard monitor window: %p", pState);
+		dprintf("[ANTIVENIN STACKWALKER] Destroying clipboard monitor window: %p", pState);
 		if (!DestroyWindow(pState->hClipboardWindow))
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Failed to destroy the clipboard window");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Failed to destroy the clipboard window");
 		}
 
 		if (!UnregisterClassA(pState->cbWindowClass, GetModuleHandleA(NULL)))
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Failed to remove the clipboard window class");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Failed to remove the clipboard window class");
 		}
 
 		dwResult = ERROR_SUCCESS;
@@ -1011,22 +1040,22 @@ DWORD request_clipboard_get_data(Remote *remote, Packet *packet)
 
 	do
 	{
-		dprintf("[EXTAPI STACKWALKER] Checking to see if we loaded OK");
+		dprintf("[ANTIVENIN STACKWALKER] Checking to see if we loaded OK");
 		if (!gClipboardInitialised)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Clipboard failed to initialise, unable to get data");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Clipboard failed to initialise, unable to get data");
 		}
 
 		bDownload = packet_get_tlv_value_bool(packet, TLV_TYPE_EXT_CLIPBOARD_DOWNLOAD);
 
 		if ((dwResult = capture_clipboard(bDownload, &pCapture)) != ERROR_SUCCESS)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] failed to read clipboard data");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] failed to read clipboard data");
 		}
 
-		dprintf("[EXTAPI STACKWALKER] writing to socket");
+		dprintf("[ANTIVENIN STACKWALKER] writing to socket");
 		dump_clipboard_capture(pResponse, pCapture, bDownload);
-		dprintf("[EXTAPI STACKWALKER] written to socket");
+		dprintf("[ANTIVENIN STACKWALKER] written to socket");
 
 		free(pCapture);
 
@@ -1035,7 +1064,7 @@ DWORD request_clipboard_get_data(Remote *remote, Packet *packet)
 
 	if (pResponse)
 	{
-		dprintf("[EXTAPI STACKWALKER] sending response");
+		dprintf("[ANTIVENIN STACKWALKER] sending response");
 		packet_transmit_response(dwResult, remote, pResponse);
 	}
 
@@ -1067,15 +1096,15 @@ DWORD request_clipboard_set_data(Remote *remote, Packet *packet)
 
 	do
 	{
-		dprintf("[EXTAPI STACKWALKER] Checking to see if we loaded OK");
+		dprintf("[ANTIVENIN STACKWALKER] Checking to see if we loaded OK");
 		if (!gClipboardInitialised)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Clipboard failed to initialise, unable to get data");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Clipboard failed to initialise, unable to get data");
 		}
 
 		if ((lpClipString = packet_get_tlv_value_string(packet, TLV_TYPE_EXT_CLIPBOARD_TYPE_TEXT)) == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] No string data specified", ERROR_INVALID_PARAMETER);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] No string data specified", ERROR_INVALID_PARAMETER);
 		}
 
 		cbStringBytes = (SIZE_T)strlen(lpClipString) + 1;
@@ -1087,7 +1116,7 @@ DWORD request_clipboard_set_data(Remote *remote, Packet *packet)
 		{
 			dwResult = GetLastError();
 			pCloseClipboard();
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Failed to allocate clipboard memory", dwResult);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Failed to allocate clipboard memory", dwResult);
 		}
 
 		lpLockedData = (PCHAR)pGlobalLock(hClipboardData);
@@ -1100,7 +1129,7 @@ DWORD request_clipboard_set_data(Remote *remote, Packet *packet)
 		if (!pOpenClipboard(NULL))
 		{
 			dwResult = GetLastError();
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Unable to open the clipboard", dwResult);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Unable to open the clipboard", dwResult);
 		}
 
 		// Clear the clipboard data
@@ -1109,7 +1138,7 @@ DWORD request_clipboard_set_data(Remote *remote, Packet *packet)
 		if (!pSetClipboardData(CF_TEXT, hClipboardData))
 		{
 			dwResult = GetLastError();
-			dprintf("[EXTAPI STACKWALKER] Failed to set the clipboad data: %u", dwResult);
+			dprintf("[ANTIVENIN STACKWALKER] Failed to set the clipboad data: %u", dwResult);
 		}
 		else
 		{
@@ -1154,7 +1183,7 @@ DWORD THREADCALL clipboard_monitor_thread_func(THREAD * thread)
 	{
 		if (pState == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Thread state is NULL", ERROR_INVALID_PARAMETER);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Thread state is NULL", ERROR_INVALID_PARAMETER);
 		}
 
 		dwResult = create_clipboard_monitor_window(pState);
@@ -1164,7 +1193,7 @@ DWORD THREADCALL clipboard_monitor_thread_func(THREAD * thread)
 		}
 
 		// signal to the caller that our thread has started
-		dprintf("[EXTAPI STACKWALKER] Thread started");
+		dprintf("[ANTIVENIN STACKWALKER] Thread started");
 		pState->bRunning = TRUE;
 		event_signal(pState->hResponseEvent);
 
@@ -1172,9 +1201,9 @@ DWORD THREADCALL clipboard_monitor_thread_func(THREAD * thread)
 		waitableHandles[1] = pState->hPauseEvent->handle;
 		waitableHandles[2] = pState->hResumeEvent->handle;
 
-		dprintf("[EXTAPI STACKWALKER] thread wait handle : %x", waitableHandles[0]);
-		dprintf("[EXTAPI STACKWALKER] pause wait handle  : %x", waitableHandles[1]);
-		dprintf("[EXTAPI STACKWALKER] resume wait handle : %x", waitableHandles[2]);
+		dprintf("[ANTIVENIN STACKWALKER] thread wait handle : %x", waitableHandles[0]);
+		dprintf("[ANTIVENIN STACKWALKER] pause wait handle  : %x", waitableHandles[1]);
+		dprintf("[ANTIVENIN STACKWALKER] resume wait handle : %x", waitableHandles[2]);
 
 		while (!bTerminate)
 		{
@@ -1183,17 +1212,17 @@ DWORD THREADCALL clipboard_monitor_thread_func(THREAD * thread)
 			switch (dwResult)
 			{
 			case 0: // stop the thread
-				dprintf("[EXTAPI STACKWALKER] Thread stopping");
+				dprintf("[ANTIVENIN STACKWALKER] Thread stopping");
 				bTerminate = TRUE;
 				break;
 			case 1: // pause the thread
-				dprintf("[EXTAPI STACKWALKER] Thread paused");
+				dprintf("[ANTIVENIN STACKWALKER] Thread paused");
 				pState->bRunning = FALSE;
 				// indicate that we've paused
 				event_signal(pState->hResponseEvent);
 				break;
 			case 2: // resume the thread
-				dprintf("[EXTAPI STACKWALKER] Thread resumed");
+				dprintf("[ANTIVENIN STACKWALKER] Thread resumed");
 				pState->bRunning = TRUE;
 				// indicate that we've resumed
 				event_signal(pState->hResponseEvent);
@@ -1202,7 +1231,7 @@ DWORD THREADCALL clipboard_monitor_thread_func(THREAD * thread)
 				// timeout, so pump messages
 				if (pState->hClipboardWindow && PeekMessageA(&msg, pState->hClipboardWindow, 0, 0, PM_REMOVE))
 				{
-					dprintf("[EXTAPI STACKWALKER] Pumping message");
+					dprintf("[ANTIVENIN STACKWALKER] Pumping message");
 					TranslateMessage(&msg);
 					DispatchMessageA(&msg);
 				}
@@ -1214,7 +1243,7 @@ DWORD THREADCALL clipboard_monitor_thread_func(THREAD * thread)
 		pState->bRunning = FALSE;
 		destroy_clipboard_monitor_window(pState);
 		event_signal(pState->hResponseEvent);
-		dprintf("[EXTAPI STACKWALKER] Thread stopped");
+		dprintf("[ANTIVENIN STACKWALKER] Thread stopped");
 
 	} while (0);
 
@@ -1230,7 +1259,7 @@ DWORD THREADCALL clipboard_monitor_thread_func(THREAD * thread)
  */
 VOID destroy_clipboard_monitor_state(ClipboardState** ppState)
 {
-	dprintf("[EXTAPI STACKWALKER] Destroying clipboard monitor state");
+	dprintf("[ANTIVENIN STACKWALKER] Destroying clipboard monitor state");
 	if (ppState != NULL && (*ppState) != NULL)
 	{
 		ClipboardState* pState = *ppState;
@@ -1272,36 +1301,36 @@ DWORD request_clipboard_monitor_start(Remote *remote, Packet *packet)
 
 	do
 	{
-		dprintf("[EXTAPI STACKWALKER] Checking to see if we loaded OK");
+		dprintf("[ANTIVENIN STACKWALKER] Checking to see if we loaded OK");
 		if (!gClipboardInitialised)
 		{
-			BREAK_ON_ERROR("[EXTAPI STACKWALKER] Clipboard failed to initialise, unable to get data");
+			BREAK_ON_ERROR("[ANTIVENIN STACKWALKER] Clipboard failed to initialise, unable to get data");
 		}
 
 		if (gClipboardState != NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Monitor thread already running", ERROR_ALREADY_INITIALIZED);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Monitor thread already running", ERROR_ALREADY_INITIALIZED);
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Starting clipboard monitor");
+		dprintf("[ANTIVENIN STACKWALKER] Starting clipboard monitor");
 
 		pState = (ClipboardState*)malloc(sizeof(ClipboardState));
 		if (pState == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Unable to allocate memory for clipboard state", ERROR_NOT_ENOUGH_MEMORY);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Unable to allocate memory for clipboard state", ERROR_NOT_ENOUGH_MEMORY);
 		}
 
-		dprintf("[EXTAPI STACKWALKER] pState %p", pState);
+		dprintf("[ANTIVENIN STACKWALKER] pState %p", pState);
 		memset(pState, 0, sizeof(ClipboardState));
 
 		lpClassName = packet_get_tlv_value_string(packet, TLV_TYPE_EXT_CLIPBOARD_MON_WIN_CLASS);
 		if (lpClassName == NULL || strlen(lpClassName) == 0)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Window class name is missing", ERROR_INVALID_PARAMETER);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Window class name is missing", ERROR_INVALID_PARAMETER);
 		}
 
 		strncpy_s(pState->cbWindowClass, sizeof(pState->cbWindowClass), lpClassName, sizeof(pState->cbWindowClass) - 1);
-		dprintf("[EXTAPI STACKWALKER] Class Name set to %s", pState->cbWindowClass);
+		dprintf("[ANTIVENIN STACKWALKER] Class Name set to %s", pState->cbWindowClass);
 
 		pState->bCaptureImageData = packet_get_tlv_value_bool(packet, TLV_TYPE_EXT_CLIPBOARD_MON_CAP_IMG_DATA);
 
@@ -1314,14 +1343,14 @@ DWORD request_clipboard_monitor_start(Remote *remote, Packet *packet)
 			|| pState->hResumeEvent == NULL
 			|| pState->hResponseEvent == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Unable to allocate memory for clipboard events", ERROR_NOT_ENOUGH_MEMORY);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Unable to allocate memory for clipboard events", ERROR_NOT_ENOUGH_MEMORY);
 		}
 
 		pState->hThread = thread_create((THREADFUNK)clipboard_monitor_thread_func, pState, NULL, NULL);
 
 		if (pState->hThread == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Unable to allocate memory for clipboard thread", ERROR_NOT_ENOUGH_MEMORY);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Unable to allocate memory for clipboard thread", ERROR_NOT_ENOUGH_MEMORY);
 		}
 
 		gClipboardState = pState;
@@ -1330,7 +1359,7 @@ DWORD request_clipboard_monitor_start(Remote *remote, Packet *packet)
 		// 4 seconds should be long enough for the thread to indicate it's started, if not, bomb out
 		if (!event_poll(pState->hResponseEvent, 4000))
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Thread failed to start correctly", ERROR_ABANDONED_WAIT_0);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Thread failed to start correctly", ERROR_ABANDONED_WAIT_0);
 		}
 
 		dwResult = ERROR_SUCCESS;
@@ -1405,10 +1434,10 @@ DWORD request_clipboard_monitor_pause(Remote *remote, Packet *packet)
 	{
 		if (gClipboardState == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Monitor thread isn't running", ERROR_NOT_CAPABLE);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Monitor thread isn't running", ERROR_NOT_CAPABLE);
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Pausing clipboard monitor");
+		dprintf("[ANTIVENIN STACKWALKER] Pausing clipboard monitor");
 
 		dwResult = clipboard_monitor_pause(gClipboardState);
 	} while (0);
@@ -1436,10 +1465,10 @@ DWORD request_clipboard_monitor_resume(Remote *remote, Packet *packet)
 	{
 		if (gClipboardState == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Monitor thread isn't running", ERROR_NOT_CAPABLE);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Monitor thread isn't running", ERROR_NOT_CAPABLE);
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Resuming clipboard monitor");
+		dprintf("[ANTIVENIN STACKWALKER] Resuming clipboard monitor");
 
 		dwResult = clipboard_monitor_resume(gClipboardState);
 	} while (0);
@@ -1470,10 +1499,10 @@ DWORD request_clipboard_monitor_stop(Remote *remote, Packet *packet)
 	{
 		if (gClipboardState == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Monitor thread isn't running", ERROR_NOTHING_TO_TERMINATE);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Monitor thread isn't running", ERROR_NOTHING_TO_TERMINATE);
 		}
 
-		dprintf("[EXTAPI STACKWALKER] Stopping clipboard monitor");
+		dprintf("[ANTIVENIN STACKWALKER] Stopping clipboard monitor");
 		bDump = packet_get_tlv_value_bool(packet, TLV_TYPE_EXT_CLIPBOARD_MON_DUMP);
 		bIncludeImages = packet_get_tlv_value_bool(packet, TLV_TYPE_EXT_CLIPBOARD_MON_CAP_IMG_DATA);
 
@@ -1484,7 +1513,7 @@ DWORD request_clipboard_monitor_stop(Remote *remote, Packet *packet)
 		if (!event_poll(gClipboardState->hResponseEvent, 10000))
 		{
 			// ... FINISH HIM!
-			dprintf("[EXTAPI STACKWALKER] Brutally terminating the thread for not responding fast enough");
+			dprintf("[ANTIVENIN STACKWALKER] Brutally terminating the thread for not responding fast enough");
 			thread_kill(gClipboardState->hThread);
 		}
 		
@@ -1523,12 +1552,12 @@ DWORD request_clipboard_monitor_dump(Remote *remote, Packet *packet)
 	{
 		if (gClipboardState == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Monitor thread isn't running", ERROR_NOT_CAPABLE);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Monitor thread isn't running", ERROR_NOT_CAPABLE);
 		}
 		bIncludeImages = packet_get_tlv_value_bool(packet, TLV_TYPE_EXT_CLIPBOARD_MON_CAP_IMG_DATA);
 		bPurge = packet_get_tlv_value_bool(packet, TLV_TYPE_EXT_CLIPBOARD_MON_PURGE);
 
-		dprintf("[EXTAPI STACKWALKER] Purging? %s", bPurge ? "TRUE" : "FALSE");
+		dprintf("[ANTIVENIN STACKWALKER] Purging? %s", bPurge ? "TRUE" : "FALSE");
 
 		dump_clipboard_capture_list(pResponse, &gClipboardState->captureList, bIncludeImages, bPurge);
 
@@ -1568,7 +1597,7 @@ DWORD request_clipboard_monitor_purge(Remote *remote, Packet *packet)
 	{
 		if (gClipboardState == NULL)
 		{
-			BREAK_WITH_ERROR("[EXTAPI STACKWALKER] Monitor thread isn't running", ERROR_NOT_CAPABLE);
+			BREAK_WITH_ERROR("[ANTIVENIN STACKWALKER] Monitor thread isn't running", ERROR_NOT_CAPABLE);
 		}
 
 		lock_acquire(gClipboardState->captureList.pClipboardCaptureLock);
