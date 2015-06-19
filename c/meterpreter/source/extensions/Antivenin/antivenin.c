@@ -1,6 +1,6 @@
 /*!
- * @file bare.c
- * @brief Entry point and intialisation functionality for the bare extention.
+ * @file antivenin.c
+ * @brief Entry point and intialisation functionality for the antivenin extention.
  */
 #include "../../common/common.h"
 
@@ -10,11 +10,9 @@
 // second stage reflective dll inject payload and not the metsrv itself when it loads extensions.
 #include "../../ReflectiveDLLInjection/dll/src/ReflectiveLoader.c"
 
-#include "thread.h"
+#include "threads.h"
 #include "memory.h"
-#include "file.h"
-
-
+#include "files.h"
 
 // this sets the delay load hook function, see DelayLoadMetSrv.h
 EnableDelayLoadMetSrv();
@@ -22,7 +20,6 @@ EnableDelayLoadMetSrv();
 /*! @brief List of commands that the antivenin API extension provides. */
 Command customCommands[] =
 {
-	// custom commands go here
 	COMMAND_REQ("antivenin_thread_trace", request_thread_trace),
 	COMMAND_REQ("antivenin_thread_kill", request_thread_kill),
 	COMMAND_REQ("antivenin_thread_find_references", request_thread_find_references), //NtQueryInformationThread > NT_TIB > Stackbase && StackLimit
@@ -37,25 +34,21 @@ Command customCommands[] =
 	COMMAND_TERMINATOR
 };
 
-/*!
- * @brief Initialize the server extension
- */
+/*! @brief Initialize the server extension */
 DWORD __declspec(dllexport) InitServerExtension(Remote *remote)
 {
 	hMetSrv = remote->met_srv;
 
 	command_register_all(customCommands);
 
-	initialize_thread();
+	initialize_threads();
 	initialize_memory();
-	initialize_file();
+	initialize_files();
 
 	return ERROR_SUCCESS;
 }
 
-/*!
- * @brief Deinitialize the server extension
- */
+/*! @brief Deinitialize the server extension */
 DWORD __declspec(dllexport) DeinitServerExtension(Remote *remote)
 {
 	command_deregister_all(customCommands);
