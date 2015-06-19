@@ -200,7 +200,7 @@ static PGETMODULEINFORMATION pGetModuleInformation = NULL;
  * @remark This function has the job of finding all the stackwalker related function pointers.
  * @returns An indication of success or failure.
  */
-DWORD initialize_thread()
+DWORD initialize_threads()
 {
 #ifdef _WIN32
 	DWORD dwResult;
